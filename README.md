@@ -1,323 +1,208 @@
 # telegram-bot222222222
-Mana so'ralgan barcha xususiyatlarni (CallbackData, Pagination, Dynamic inline keyboards, URL tugmalar va boshqalar) o'zida jamlagan Aiogram 3.x uchun to'liq va professional tayyorlangan kod:
+Aiogram (Python) yordamida berilgan barcha talablarga javob beradigan to'liq FSM (Finite State Machine) kodi va so'ngida MemoryStorage vs RedisStorage taqqoslash hisoboti:
 
+1. Telegram Bot Kodi (Aiogram 3.x)
 Python
 import asyncio
 import logging
-from typing import Optional
+from aiogram import Bot, Dispatcher, F, Router
+from aiogram.filters import Command, CommandStart
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.types import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    Message,
+    ReplyKeyboardMarkup,
+    ReplyKeyboardRemove,
+)
 
-from aiogram import Bot, Dispatcher, F, html, types
-from aiogram.client.default import DefaultBotProperties
-from aiogram.enums import ParseMode
-from aiogram.filters import Command
-from aiogram.filters.callback_data import CallbackData
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
+BOT_TOKEN = "YOUR_BOT_TOKEN_HERE"
 
-# ==========================
-# KONFIGURATSIYA
-# ==========================
-BOT_TOKEN = "YOUR_BOT_TOKEN_HERE"  # Bot tokeningizni kiriting
+# 1. StatesGroup — 6 ta state
+class RegistrationForm(StatesGroup):
+    name = State()         # 1/6
+    age = State()          # 2/6
+    gender = State()       # 3/6
+    city = State()         # 4/6
+    phone = State()        # 5/6
+    confirm = State()      # 6/6
 
-logging.basicConfig(level=logging.INFO)
-bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
-dp = Dispatcher()
+router = Router()
 
+# Klaviaturalar
+def get_gender_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Erkak", callback_data="gender_erkak"),
+         InlineKeyboardButton(text="Ayol", callback_data="gender_ayol")]
+    ])
 
-# ==========================
-# 1. CALLBACK DATA KLASSLARI (Kamida 2 ta)
-# ==========================
-class OrderCB(CallbackData, prefix="order"):
-    action: str  # view, edit, delete, confirm_delete
-    order_id: int
+def get_city_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Toshkent", callback_data="city_Toshkent"),
+         InlineKeyboardButton(text="Samarqand", callback_data="city_Samarqand")],
+        [InlineKeyboardButton(text="Farg'ona", callback_data="city_Farg'ona"),
+         InlineKeyboardButton(text="Boshqa", callback_data="city_Boshqa")]
+    ])
 
-
-class PaginationCB(CallbackData, prefix="page"):
-    page: int
-
-
-class RateCB(CallbackData, prefix="rate"):
-    vote: str  # like, dislike
-
-
-class StarCB(CallbackData, prefix="star"):
-    rating: int
-
-
-# ==========================
-# FAKE MA'LUMOTLAR
-# ==========================
-FAKE_ORDERS = {
-    101: {"item": "🍕 Margarita Pizza", "status": "Kutilmoqda"},
-    102: {"item": "🍔 Cheeseburger", "status": "Yetkazilmoqda"},
-    103: {"item": "💻 Python Kursi", "status": "To'langan"},
-}
-
-# 50 ta item yaratish
-ITEMS = [f"📦 Mahsulot #{i}" for i in range(1, 51)]
-
-
-# ==========================
-# /rate HANDLER
-# ==========================
-@dp.message(Command("rate"))
-async def cmd_rate(message: Message):
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="👍 Like", callback_data=RateCB(vote="like").pack()
-                ),
-                InlineKeyboardButton(
-                    text="👎 Dislike", callback_data=RateCB(vote="dislike").pack()
-                ),
-            ]
-        ]
-    )
-    await message.answer("Ushbu xizmatimizga baho bering:", reply_markup=keyboard)
-
-
-@dp.callback_query(RateCB.filter())
-async def process_rate(call: types.CallbackQuery, callback_data: RateCB):
-    # show_alert=True bilan bildirishnoma ko'rsatish
-    res_text = "Rahmat! Like bosdingiz! 👍" if callback_data.vote == "like" else "Rahmat! Dislike bosdingiz! 👎"
-    await call.answer(text=res_text, show_alert=True)
-
-
-# ==========================
-# /stars HANDLER (edit_text bilan)
-# ==========================
-@dp.message(Command("stars"))
-async def cmd_stars(message: Message):
-    buttons = [
-        InlineKeyboardButton(
-            text=f"⭐ {i}", callback_data=StarCB(rating=i).pack()
-        )
-        for i in range(1, 6)
-    ]
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[buttons])
-    await message.answer("Bahoingizni tanlang (1-5):", reply_markup=keyboard)
-
-
-@dp.callback_query(StarCB.filter())
-async def process_stars(call: types.CallbackQuery, callback_data: StarCB):
-    await call.answer()  # Doim loading'ni to'xtatish
-    await call.message.edit_text(
-        f"Siz {callback_data.rating} ⭐ baho qo'ydingiz! Rahmat!"
+def get_phone_keyboard():
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="📱 Kontaktni ulashish", request_contact=True)]],
+        resize_keyboard=True,
+        one_time_keyboard=True
     )
 
+def get_confirm_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Tasdiqlash", callback_data="confirm_yes"),
+         InlineKeyboardButton(text="❌ Bekor qilish", callback_data="confirm_no")]
+    ])
 
-# ==========================
-# /orders HANDLER (CRUD + Tasdiqlash tugmasi)
-# ==========================
-def get_orders_keyboard():
-    keyboard = []
-    for order_id, data in FAKE_ORDERS.items():
-        row = [
-            InlineKeyboardButton(
-                text=f"{data['item']}",
-                callback_data=OrderCB(action="view", order_id=order_id).pack(),
-            ),
-            InlineKeyboardButton(
-                text="✏️",
-                callback_data=OrderCB(action="edit", order_id=order_id).pack(),
-            ),
-            InlineKeyboardButton(
-                text="🗑",
-                callback_data=OrderCB(action="delete", order_id=order_id).pack(),
-            ),
-        ]
-        keyboard.append(row)
-    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+# Database simulyatsiyasi
+async def save_user(data: dict):
+    print(f" Foydalanuvchi ma'lumotlar bazasiga saqlandi: {data}")
 
+# /cancel komandasi (Har qanday bosqichda ishlaydi)
+@router.message(Command("cancel"))
+@router.callback_query(F.data == "confirm_no")
+async def cancel_handler(event: Message | CallbackQuery, state: FSMContext):
+    current_state = await state.get_state()
+    if current_state is None:
+        if isinstance(event, Message):
+            await event.answer("Hozirda hech qanday jarayon yo'q.")
+        return
 
-@dp.message(Command("orders"))
-async def cmd_orders(message: Message):
-    await message.answer("Buyurtmalaringiz ro'yxati:", reply_markup=get_orders_keyboard())
+    await state.clear()
+    text = " Jarayon bekor qilindi. Qaytadan boshlash uchun /start bosing."
+    
+    if isinstance(event, Message):
+        await event.answer(text, reply_markup=ReplyKeyboardRemove())
+    else:
+        await event.message.edit_text(text)
 
+# Bosqich 0: /start
+@router.message(CommandStart())
+async def start_handler(message: Message, state: FSMContext):
+    await state.set_state(RegistrationForm.name)
+    await message.answer("Ro'yxatdan o'tish boshlandi!\n\n(1/6) **Ismingizni kiriting:** (2-50 ta belgi)")
 
-@dp.callback_query(OrderCB.filter(F.action == "view"))
-async def view_order(call: types.CallbackQuery, callback_data: OrderCB):
-    await call.answer()
-    order = FAKE_ORDERS.get(callback_data.order_id)
-    if order:
-        await call.message.answer(
-            f"ℹ️ <b>Buyurtma #{callback_data.order_id}</b>\n"
-            f"Nomi: {order['item']}\nStatus: {order['status']}"
-        )
+# Bosqich 1: Ism validatsiyasi
+@router.message(RegistrationForm.name)
+async def process_name(message: Message, state: FSMContext):
+    name = message.text.strip()
+    if not (2 <= len(name) <= 50):
+        await message.answer(" Ism uzunligi 2 dan 50 tagacha belgi bo'lishi kerak. Qaytadan kiriting:")
+        return
 
+    await state.update_data(name=name)
+    await state.set_state(RegistrationForm.age)
+    await message.answer("(2/6) **Yoshingizni kiriting:** (14 dan 100 gacha)")
 
-@dp.callback_query(OrderCB.filter(F.action == "edit"))
-async def edit_order(call: types.CallbackQuery, callback_data: OrderCB):
-    await call.answer("Tahrirlash rejimi tanlandi")
-    await call.message.answer(f"✏️ Buyurtma #{callback_data.order_id} tahrirlash uchun tanlandi.")
+# Bosqich 2: Yosh validatsiyasi
+@router.message(RegistrationForm.age)
+async def process_age(message: Message, state: FSMContext):
+    if not message.text.isdigit():
+        await message.answer(" Iltimos, yoshingizni faqat raqamda kiriting:")
+        return
 
+    age = int(message.text)
+    if not (14 <= age <= 100):
+        await message.answer(" Yosh 14 va 100 oraliqida bo'lishi kerak. Qaytadan kiriting:")
+        return
 
-@dp.callback_query(OrderCB.filter(F.action == "delete"))
-async def confirm_delete_order(call: types.CallbackQuery, callback_data: OrderCB):
-    await call.answer()
-    # Tasdiqlovchi tugma yaratish
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="❌ Ha, o'chiring!",
-                    callback_data=OrderCB(
-                        action="confirm_delete", order_id=callback_data.order_id
-                    ).pack(),
-                ),
-                InlineKeyboardButton(
-                    text="Bekor qilish", callback_data="cancel_action"
-                ),
-            ]
-        ]
-    )
-    await call.message.edit_text(
-        f"⚠️ Haqiqatan ham #{callback_data.order_id} buyurtmani o'chirmoqchimisiz?",
-        reply_markup=keyboard,
-    )
+    await state.update_data(age=age)
+    await state.set_state(RegistrationForm.gender)
+    await message.answer("(3/6) **Jinsingizni tanlang:**", reply_markup=get_gender_keyboard())
 
+# Bosqich 3: Jins (Inline keyboard)
+@router.callback_query(RegistrationForm.gender, F.data.startswith("gender_"))
+async def process_gender(callback: CallbackQuery, state: FSMContext):
+    gender = callback.data.split("_")[1].capitalize()
+    await state.update_data(gender=gender)
+    
+    await callback.message.delete()
+    await state.set_state(RegistrationForm.city)
+    await callback.message.answer("(4/6) **Shahringizni tanlang:**", reply_markup=get_city_keyboard())
 
-@dp.callback_query(OrderCB.filter(F.action == "confirm_delete"))
-async def process_delete(call: types.CallbackQuery, callback_data: OrderCB):
-    await call.answer("O'chirildi!", show_alert=True)
-    FAKE_ORDERS.pop(callback_data.order_id, None)
-    await call.message.edit_text("✅ Buyurtma muvaffaqiyatli o'chirildi.")
+# Bosqich 4: Shahar (Inline keyboard)
+@router.callback_query(RegistrationForm.city, F.data.startswith("city_"))
+async def process_city(callback: CallbackQuery, state: FSMContext):
+    city = callback.data.split("_")[1]
+    await state.update_data(city=city)
 
-
-@dp.callback_query(F.data == "cancel_action")
-async def cancel_action(call: types.CallbackQuery):
-    await call.answer("Bekor qilindi")
-    await call.message.edit_text("Buyurtmalar ro'yxati:", reply_markup=get_orders_keyboard())
-
-
-# ==========================
-# /list HANDLER (PAGINATION - 50 ta item, 5 ta/sahifa)
-# ==========================
-ITEMS_PER_PAGE = 5
-
-
-def get_pagination_keyboard(page: int = 1):
-    total_pages = (len(ITEMS) + ITEMS_PER_PAGE - 1) // ITEMS_PER_PAGE
-    buttons = []
-
-    if page > 1:
-        buttons.append(
-            InlineKeyboardButton(
-                text="⬅️ Orqaga", callback_data=PaginationCB(page=page - 1).pack()
-            )
-        )
-
-    buttons.append(
-        InlineKeyboardButton(
-            text=f"{page}/{total_pages}", callback_data="ignore"
-        )
+    await callback.message.delete()
+    await state.set_state(RegistrationForm.phone)
+    await callback.message.answer(
+        "(5/6) **Telefon raqamingizni yuboring:**",
+        reply_markup=get_phone_keyboard()
     )
 
-    if page < total_pages:
-        buttons.append(
-            InlineKeyboardButton(
-                text="Oldinga ➡️", callback_data=PaginationCB(page=page + 1).pack()
-            )
-        )
-
-    return InlineKeyboardMarkup(inline_keyboard=[buttons])
-
-
-@dp.message(Command("list"))
-async def cmd_list(message: Message):
-    page = 1
-    start = (page - 1) * ITEMS_PER_PAGE
-    end = start + ITEMS_PER_PAGE
-    current_items = ITEMS[start:end]
-
-    text = f"<b>Mahsulotlar ro'yxati ({page}-sahifa):</b>\n\n" + "\n".join(current_items)
-    await message.answer(text, reply_markup=get_pagination_keyboard(page))
-
-
-@dp.callback_query(PaginationCB.filter())
-async def process_pagination(call: types.CallbackQuery, callback_data: PaginationCB):
-    await call.answer()
-    page = callback_data.page
-    start = (page - 1) * ITEMS_PER_PAGE
-    end = start + ITEMS_PER_PAGE
-    current_items = ITEMS[start:end]
-
-    text = f"<b>Mahsulotlar ro'yxati ({page}-sahifa):</b>\n\n" + "\n".join(current_items)
-    await call.message.edit_text(text, reply_markup=get_pagination_keyboard(page))
-
-
-@dp.callback_query(F.data == "ignore")
-async def ignore_click(call: types.CallbackQuery):
-    await call.answer()  # Sahifa raqami bosilganda shunchaki yuklanishni to'xtatish
-
-
-# ==========================
-# /link HANDLER (URL Tugmalar)
-# ==========================
-@dp.message(Command("link"))
-async def cmd_link(message: Message):
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="✈️ Telegram", url="https://t.me")],
-            [InlineKeyboardButton(text="📸 Instagram", url="https://instagram.com")],
-            [InlineKeyboardButton(text="🌐 GitHub", url="https://github.com")],
-        ]
+# Bosqich 5: Telefon raqam (Reply Keyboard Contact)
+@router.message(RegistrationForm.phone, F.contact)
+async def process_phone(message: Message, state: FSMContext):
+    phone_number = message.contact.phone_number
+    await state.update_data(phone=phone_number)
+    
+    data = await state.get_data()
+    await state.set_state(RegistrationForm.confirm)
+    
+    summary_text = (
+        "(6/6) **Ma'lumotlaringizni tasdiqlang:**\n\n"
+        f"👤 **Ism:** {data['name']}\n"
+        f"🎂 **Yosh:** {data['age']}\n"
+        f"🚻 **Jins:** {data['gender']}\n"
+        f"🏙 **Shahar:** {data['city']}\n"
+        f"📞 **Tel:** {data['phone']}\n\n"
+        "Ma'lumotlar to'g'rimi?"
     )
-    await message.answer("Ijtimoiy tarmoqlarimiz:", reply_markup=keyboard)
+    
+    await message.answer("Rahmat!", reply_markup=ReplyKeyboardRemove())
+    await message.answer(summary_text, reply_markup=get_confirm_keyboard())
 
+# Noto'g'ri kontakt yuborilganda
+@router.message(RegistrationForm.phone)
+async def process_phone_invalid(message: Message):
+    await message.answer(" Iltimos, **📱 Kontaktni ulashish** tugmasini bosing.")
 
-# ==========================
-# ATAYLAB ANSWER'SIZ HANDLER (Tushuntirish)
-# ==========================
-@dp.message(Command("no_answer_demo"))
-async def cmd_no_answer_demo(message: Message):
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="⚠️ Meni bosing (call.answer'siz)",
-                    callback_data="bad_button",
-                )
-            ]
-        ]
-    )
-    await message.answer(
-        "Quyidagi tugma ataylab answer'siz qoldirilgan:", reply_markup=keyboard
-    )
+# Bosqich 6: Tasdiqlash va saqlash
+@router.callback_query(RegistrationForm.confirm, F.data == "confirm_yes")
+async def process_confirm(callback: CallbackQuery, state: FSMContext):
+    user_data = await state.get_data()
+    
+    # Ma'lumotlarni saqlash
+    await save_user(user_data)
+    
+    # State ni tozalash
+    await state.clear()
+    
+    await callback.message.edit_text(" Muvaffaqiyatli ro'yxatdan o'tdingiz! Ma'lumotlaringiz saqlandi.")
 
-
-@dp.callback_query(F.data == "bad_button")
-async def bad_button_handler(call: types.CallbackQuery):
-    # ATAYLAB await call.answer() YOZILMAGAN!
-    # SABABI VA OQIBATI:
-    # 1. Telegram foydalanuvchi interfeysida tugma ustidagi "soat/aylanayotgan yuklanish" (loading spinner)
-    #    taxminan 10-60 soniya davomida yo'qolmay turib qoladi.
-    # 2. Foydalanuvchiga bot qotib qolgandek yoki ishlamayotgandek tuyuladi.
-    # 3. Telegram serveri botga shu callback'ni qayta-qayta yuborishi va keraksiz server resursi sarflanishi mumkin.
-    await call.message.answer(
-        "Siz tugmani bosdingiz, lekin `call.answer()` chaqirilmagani uchun tugmada yuklanish (loading) aylanib turibdi!"
-    )
-
-
-# ==========================
-# BOTNI ISHGA TUSHIRISH
-# ==========================
+# Botni ishga tushirish
 async def main():
-    print("✅ Bot callback funksiyalar bilan ishga tushdi...")
+    # 1. MemoryStorage o'rnatish
+    storage = MemoryStorage()
+    bot = Bot(token=BOT_TOKEN)
+    dp = Dispatcher(storage=storage)
+    
+    dp.include_router(router)
     await dp.start_polling(bot)
 
-
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
     asyncio.run(main())
-Kod tarkibidagi muhim xususiyatlar bo'yicha tushuntirish:
-CallbackData klasslari: OrderCB, PaginationCB, RateCB va StarCB orqali ma'lumotlarni xavfsiz va tizimli uzatish yo'lga qo'yilgan.
+2. MemoryStorage vs RedisStorage Taqqoslash Hisoboti
+Telegram botlarda FSM vaqtinchalik ma'lumotlarni (masalan: foydalanuvchi qaysi bosqichda, kiritgan javoblari) saqlash uchun Storage drayverlaridan foydalanadi.
 
-show_alert=True: /rate tugmalari bosilganda pop-up oyna ko'rinishida rasmiy ogohlantirish beradi.
+Xususiyat	MemoryStorage	RedisStorage
+Ma'lumot qayerda saqlanadi?	Serverning RAM (Operativ xotira) qismida	Alohida Redis xotira serverida (NoSQL)
+Bot qayta yuklanganda (Restart)	Barcha ma'lumotlar yo'qoladi ❌	Ma'lumotlar saqlanib qoladi ✅
+Ko'p jarayonlilik (Multi-process/Cluster)	Qo'llamaydi (faqat 1 ta bot jarayonida)	To'liq qo'llaydi (bir nechta bot nusxasi ishlashi mumkin)
+Tizim talabi	Qo'shimcha dastur kerak emas	Redis serverini o'rnatish va sozlash talab qilinadi
+Tavsiya etiladigan holat	Testlash, kichik va shaxsiy botlar uchun	Production, yuqori yuklamali va muhim botlar uchun
+Qisqacha xulosa:
+MemoryStorage loyihani ishlab chiqish (development) va kichik loyihalar uchun tezkor yechimdir. Bot tayyor bo'lgach yoki restart berilganda foydalanuvchilarning bosqichlari (states) va vaqtinchalik kiritgan ma'lumotlari o'chib ketadi.
 
-/stars va edit_text: Tugma bosilganda yangi xabar yubormasdan, mavjud xabarning o'zini o'zgartiradi.
-
-/orders va Tasdiqlash: Har bir buyurtma yonida ko'rish, tahrirlash va o'chirish tugmasi bor. O'chirish bosilganda "Ha, o'chiring!" va "Bekor qilish" tasdiq oynasiga o'tadi.
-
-/list Pagination: 50 ta element 5 tadan bo'lib sahifalangan. Oldinga/Orqaga tugmalari va 1/10 ko'rinishidagi sahifa ko'rsatkichi bor.
-
-/no_answer_demo: call.answer() yozilmasa tugmada qanday aylanuvchi yuklanish belgisi paydo bo'lishini va foydalanuvchiga bot qotgandek ko'rinishini amalda tushuntiradi.
+RedisStorage esa haqiqiy botlar (production) uchun shart. Agarda serverda profilaktika bo'lib bot qayta tushsa ham, foydalanuvchilar qolgan joyidan muloqotni bemalol davom ettira oladilar.
