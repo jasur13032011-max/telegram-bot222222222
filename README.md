@@ -1,269 +1,323 @@
 # telegram-bot222222222
-Aiogram 3.x kutubxonasida Python'da yozilgan Telegram bot kodi. Kod 3 darajali menyu, Unsplash rasmlari, dict-bazasi va HTML formatlash standartlariga to'liq javob beradi.
+Mana so'ralgan barcha xususiyatlarni (CallbackData, Pagination, Dynamic inline keyboards, URL tugmalar va boshqalar) o'zida jamlagan Aiogram 3.x uchun to'liq va professional tayyorlangan kod:
 
-Telegram Bot Kodi (bot.py)
 Python
 import asyncio
 import logging
-from aiogram import Bot, Dispatcher, F, types
+from typing import Optional
+
+from aiogram import Bot, Dispatcher, F, html, types
+from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram.filters import CommandStart
-from aiogram.types import (
-    KeyboardButton,
-    ReplyKeyboardMarkup,
-    ReplyKeyboardRemove,
-    URLInputFile,
-)
+from aiogram.filters import Command
+from aiogram.filters.callback_data import CallbackData
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
 
-# Bot tokeningizni kiriting
-BOT_TOKEN = "BOT_TOKENINI_SHUYERGA_YOZING"
+# ==========================
+# KONFIGURATSIYA
+# ==========================
+BOT_TOKEN = "YOUR_BOT_TOKEN_HERE"  # Bot tokeningizni kiriting
 
-bot = Bot(token=BOT_TOKEN)
+logging.basicConfig(level=logging.INFO)
+bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 
-# ----------------------------------------------------------------------
-# 1. MA'LUMOTLAR BAZASI (PRODUCTS dict)
-# ----------------------------------------------------------------------
-PRODUCTS = {
-    "Taomlar": {
-        "🍕 Pizza": {
-            "name": "Margarita Pizzasi",
-            "price": "75,000 so'm",
-            "desc": "Yangi pomidorlar, Motsarella pishlog'i va rayhon barglari bilan tayyorlangan klassik pissa.",
-            "image": "https://images.unsplash.com/photo-1513104890138-7c749659a591?auto=format&fit=crop&w=800&q=80",
-        },
-        "🍔 Burger": {
-            "name": "Cheeseburger Double",
-            "price": "45,000 so'm",
-            "desc": "Ikkita suvli mol go'shti kotleti, Cheddar pishlog'i va maxsus sous.",
-            "image": "https://images.unsplash.com/photo-1568901346375-23c9450c58cd?auto=format&fit=crop&w=800&q=80",
-        },
-        "🌮 Taco": {
-            "name": "Meksikancha Taco",
-            "price": "35,000 so'm",
-            "desc": "Qiyma go'sht, makkajo'xori, lobiya va achchiq sous bilan tortilgan Taco.",
-            "image": "https://images.unsplash.com/photo-1565299585323-38d6b0865b47?auto=format&fit=crop&w=800&q=80",
-        },
-        "🍜 Lag'mon": {
-            "name": "Uyg'urcha Lag'mon",
-            "price": "40,000 so'm",
-            "desc": "Klassik usulda cho'zilgan xamir, yangi sabzavotlar va mol go'shti.",
-            "image": "https://images.unsplash.com/photo-1569718212165-3a8278d5f624?auto=format&fit=crop&w=800&q=80",
-        },
-    },
-    "Ichimliklar": {
-        "☕ Kofe": {
-            "name": "Cappuccino",
-            "price": "22,000 so'm",
-            "desc": "Xushbo'y espresso va yumshoq sut ko'pigi.",
-            "image": "https://images.unsplash.com/photo-1534778101976-62847782c213?auto=format&fit=crop&w=800&q=80",
-        },
-        "🍵 Choy": {
-            "name": "Ko'k Choy (Limon bilan)",
-            "price": "10,000 so'm",
-            "desc": "Oliy navli ko'k choy va yangi kesilgan limon tilimlari.",
-            "image": "https://images.unsplash.com/photo-1576092768241-dec231879fc3?auto=format&fit=crop&w=800&q=80",
-        },
-        "🧃 Sok": {
-            "name": "Yangi Siqilgan Apelsin Sharbati",
-            "price": "25,000 so'm",
-            "desc": "100% tabiiy va yangi uzilgan apelsin sharbati.",
-            "image": "https://images.unsplash.com/photo-1613478223719-2ab802602423?auto=format&fit=crop&w=800&q=80",
-        },
-    },
+
+# ==========================
+# 1. CALLBACK DATA KLASSLARI (Kamida 2 ta)
+# ==========================
+class OrderCB(CallbackData, prefix="order"):
+    action: str  # view, edit, delete, confirm_delete
+    order_id: int
+
+
+class PaginationCB(CallbackData, prefix="page"):
+    page: int
+
+
+class RateCB(CallbackData, prefix="rate"):
+    vote: str  # like, dislike
+
+
+class StarCB(CallbackData, prefix="star"):
+    rating: int
+
+
+# ==========================
+# FAKE MA'LUMOTLAR
+# ==========================
+FAKE_ORDERS = {
+    101: {"item": "🍕 Margarita Pizza", "status": "Kutilmoqda"},
+    102: {"item": "🍔 Cheeseburger", "status": "Yetkazilmoqda"},
+    103: {"item": "💻 Python Kursi", "status": "To'langan"},
 }
 
-# ----------------------------------------------------------------------
-# 2. TUGMALAR (KEYBOARDS)
-# ----------------------------------------------------------------------
-
-# 1-daraja: Bosh menyu
-main_menu = ReplyKeyboardMarkup(
-    keyboard=[
-        [KeyboardButton(text="🍕 Taomlar"), KeyboardButton(text="🥤 Ichimliklar")],
-        [KeyboardButton(text="📞 Bog'lanish"), KeyboardButton(text="ℹ️ Bot haqida")],
-    ],
-    resize_keyboard=True,
-)
-
-# 2-daraja: Taomlar submenyu
-taomlar_menu = ReplyKeyboardMarkup(
-    keyboard=[
-        [KeyboardButton(text="🍕 Pizza"), KeyboardButton(text="🍔 Burger")],
-        [KeyboardButton(text="🌮 Taco"), KeyboardButton(text="🍜 Lag'mon")],
-        [KeyboardButton(text="⬅️ Orqaga")],
-    ],
-    resize_keyboard=True,
-)
-
-# 2-daraja: Ichimliklar submenyu
-ichimliklar_menu = ReplyKeyboardMarkup(
-    keyboard=[
-        [KeyboardButton(text="☕ Kofe"), KeyboardButton(text="🍵 Choy")],
-        [KeyboardButton(text="🧃 Sok")],
-        [KeyboardButton(text="⬅️ Orqaga")],
-    ],
-    resize_keyboard=True,
-)
-
-# 3-daraja: Kontent oynasidagi "Orqaga" tugmalari
-back_to_taomlar = ReplyKeyboardMarkup(
-    keyboard=[[KeyboardButton(text="⬅️ Taomlarga qaytish")]], resize_keyboard=True
-)
-
-back_to_ichimliklar = ReplyKeyboardMarkup(
-    keyboard=[[KeyboardButton(text="⬅️ Ichimliklarga qaytish")]], resize_keyboard=True
-)
+# 50 ta item yaratish
+ITEMS = [f"📦 Mahsulot #{i}" for i in range(1, 51)]
 
 
-# ----------------------------------------------------------------------
-# 3. HANDLERLAR
-# ----------------------------------------------------------------------
+# ==========================
+# /rate HANDLER
+# ==========================
+@dp.message(Command("rate"))
+async def cmd_rate(message: Message):
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="👍 Like", callback_data=RateCB(vote="like").pack()
+                ),
+                InlineKeyboardButton(
+                    text="👎 Dislike", callback_data=RateCB(vote="dislike").pack()
+                ),
+            ]
+        ]
+    )
+    await message.answer("Ushbu xizmatimizga baho bering:", reply_markup=keyboard)
 
 
-# /start buyrug'i
-@dp.message(CommandStart())
-async def cmd_start(message: types.Message):
+@dp.callback_query(RateCB.filter())
+async def process_rate(call: types.CallbackQuery, callback_data: RateCB):
+    # show_alert=True bilan bildirishnoma ko'rsatish
+    res_text = "Rahmat! Like bosdingiz! 👍" if callback_data.vote == "like" else "Rahmat! Dislike bosdingiz! 👎"
+    await call.answer(text=res_text, show_alert=True)
+
+
+# ==========================
+# /stars HANDLER (edit_text bilan)
+# ==========================
+@dp.message(Command("stars"))
+async def cmd_stars(message: Message):
+    buttons = [
+        InlineKeyboardButton(
+            text=f"⭐ {i}", callback_data=StarCB(rating=i).pack()
+        )
+        for i in range(1, 6)
+    ]
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[buttons])
+    await message.answer("Bahoingizni tanlang (1-5):", reply_markup=keyboard)
+
+
+@dp.callback_query(StarCB.filter())
+async def process_stars(call: types.CallbackQuery, callback_data: StarCB):
+    await call.answer()  # Doim loading'ni to'xtatish
+    await call.message.edit_text(
+        f"Siz {callback_data.rating} ⭐ baho qo'ydingiz! Rahmat!"
+    )
+
+
+# ==========================
+# /orders HANDLER (CRUD + Tasdiqlash tugmasi)
+# ==========================
+def get_orders_keyboard():
+    keyboard = []
+    for order_id, data in FAKE_ORDERS.items():
+        row = [
+            InlineKeyboardButton(
+                text=f"{data['item']}",
+                callback_data=OrderCB(action="view", order_id=order_id).pack(),
+            ),
+            InlineKeyboardButton(
+                text="✏️",
+                callback_data=OrderCB(action="edit", order_id=order_id).pack(),
+            ),
+            InlineKeyboardButton(
+                text="🗑",
+                callback_data=OrderCB(action="delete", order_id=order_id).pack(),
+            ),
+        ]
+        keyboard.append(row)
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+
+@dp.message(Command("orders"))
+async def cmd_orders(message: Message):
+    await message.answer("Buyurtmalaringiz ro'yxati:", reply_markup=get_orders_keyboard())
+
+
+@dp.callback_query(OrderCB.filter(F.action == "view"))
+async def view_order(call: types.CallbackQuery, callback_data: OrderCB):
+    await call.answer()
+    order = FAKE_ORDERS.get(callback_data.order_id)
+    if order:
+        await call.message.answer(
+            f"ℹ️ <b>Buyurtma #{callback_data.order_id}</b>\n"
+            f"Nomi: {order['item']}\nStatus: {order['status']}"
+        )
+
+
+@dp.callback_query(OrderCB.filter(F.action == "edit"))
+async def edit_order(call: types.CallbackQuery, callback_data: OrderCB):
+    await call.answer("Tahrirlash rejimi tanlandi")
+    await call.message.answer(f"✏️ Buyurtma #{callback_data.order_id} tahrirlash uchun tanlandi.")
+
+
+@dp.callback_query(OrderCB.filter(F.action == "delete"))
+async def confirm_delete_order(call: types.CallbackQuery, callback_data: OrderCB):
+    await call.answer()
+    # Tasdiqlovchi tugma yaratish
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="❌ Ha, o'chiring!",
+                    callback_data=OrderCB(
+                        action="confirm_delete", order_id=callback_data.order_id
+                    ).pack(),
+                ),
+                InlineKeyboardButton(
+                    text="Bekor qilish", callback_data="cancel_action"
+                ),
+            ]
+        ]
+    )
+    await call.message.edit_text(
+        f"⚠️ Haqiqatan ham #{callback_data.order_id} buyurtmani o'chirmoqchimisiz?",
+        reply_markup=keyboard,
+    )
+
+
+@dp.callback_query(OrderCB.filter(F.action == "confirm_delete"))
+async def process_delete(call: types.CallbackQuery, callback_data: OrderCB):
+    await call.answer("O'chirildi!", show_alert=True)
+    FAKE_ORDERS.pop(callback_data.order_id, None)
+    await call.message.edit_text("✅ Buyurtma muvaffaqiyatli o'chirildi.")
+
+
+@dp.callback_query(F.data == "cancel_action")
+async def cancel_action(call: types.CallbackQuery):
+    await call.answer("Bekor qilindi")
+    await call.message.edit_text("Buyurtmalar ro'yxati:", reply_markup=get_orders_keyboard())
+
+
+# ==========================
+# /list HANDLER (PAGINATION - 50 ta item, 5 ta/sahifa)
+# ==========================
+ITEMS_PER_PAGE = 5
+
+
+def get_pagination_keyboard(page: int = 1):
+    total_pages = (len(ITEMS) + ITEMS_PER_PAGE - 1) // ITEMS_PER_PAGE
+    buttons = []
+
+    if page > 1:
+        buttons.append(
+            InlineKeyboardButton(
+                text="⬅️ Orqaga", callback_data=PaginationCB(page=page - 1).pack()
+            )
+        )
+
+    buttons.append(
+        InlineKeyboardButton(
+            text=f"{page}/{total_pages}", callback_data="ignore"
+        )
+    )
+
+    if page < total_pages:
+        buttons.append(
+            InlineKeyboardButton(
+                text="Oldinga ➡️", callback_data=PaginationCB(page=page + 1).pack()
+            )
+        )
+
+    return InlineKeyboardMarkup(inline_keyboard=[buttons])
+
+
+@dp.message(Command("list"))
+async def cmd_list(message: Message):
+    page = 1
+    start = (page - 1) * ITEMS_PER_PAGE
+    end = start + ITEMS_PER_PAGE
+    current_items = ITEMS[start:end]
+
+    text = f"<b>Mahsulotlar ro'yxati ({page}-sahifa):</b>\n\n" + "\n".join(current_items)
+    await message.answer(text, reply_markup=get_pagination_keyboard(page))
+
+
+@dp.callback_query(PaginationCB.filter())
+async def process_pagination(call: types.CallbackQuery, callback_data: PaginationCB):
+    await call.answer()
+    page = callback_data.page
+    start = (page - 1) * ITEMS_PER_PAGE
+    end = start + ITEMS_PER_PAGE
+    current_items = ITEMS[start:end]
+
+    text = f"<b>Mahsulotlar ro'yxati ({page}-sahifa):</b>\n\n" + "\n".join(current_items)
+    await call.message.edit_text(text, reply_markup=get_pagination_keyboard(page))
+
+
+@dp.callback_query(F.data == "ignore")
+async def ignore_click(call: types.CallbackQuery):
+    await call.answer()  # Sahifa raqami bosilganda shunchaki yuklanishni to'xtatish
+
+
+# ==========================
+# /link HANDLER (URL Tugmalar)
+# ==========================
+@dp.message(Command("link"))
+async def cmd_link(message: Message):
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="✈️ Telegram", url="https://t.me")],
+            [InlineKeyboardButton(text="📸 Instagram", url="https://instagram.com")],
+            [InlineKeyboardButton(text="🌐 GitHub", url="https://github.com")],
+        ]
+    )
+    await message.answer("Ijtimoiy tarmoqlarimiz:", reply_markup=keyboard)
+
+
+# ==========================
+# ATAYLAB ANSWER'SIZ HANDLER (Tushuntirish)
+# ==========================
+@dp.message(Command("no_answer_demo"))
+async def cmd_no_answer_demo(message: Message):
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="⚠️ Meni bosing (call.answer'siz)",
+                    callback_data="bad_button",
+                )
+            ]
+        ]
+    )
     await message.answer(
-        f"Xush kelibsiz, <b>{message.from_user.full_name}</b>! 👋\n\n"
-        f"Kerakli bo'limni tanlang:",
-        reply_markup=main_menu,
-        parse_mode=ParseMode.HTML,
+        "Quyidagi tugma ataylab answer'siz qoldirilgan:", reply_markup=keyboard
     )
 
 
-# 1-DARAJA: Bosh menyu tugmalari
-@dp.message(F.text == "🍕 Taomlar")
-async def show_taomlar(message: types.Message):
-    await message.answer("<b>Taomlar bo'limi:</b>", reply_markup=taomlar_menu, parse_mode=ParseMode.HTML)
-
-
-@dp.message(F.text == "🥤 Ichimliklar")
-async def show_ichimliklar(message: types.Message):
-    await message.answer("<b>Ichimliklar bo'limi:</b>", reply_markup=ichimliklar_menu, parse_mode=ParseMode.HTML)
-
-
-@dp.message(F.text == "📞 Bog'lanish")
-async def show_contact(message: types.Message):
-    text = (
-        "<b>📞 Biz bilan bog'lanish:</b>\n\n"
-        "📱 Telefon: +998 90 123 45 67\n"
-        "💬 Telegram: @FastFoodSupportBot\n"
-        "📍 Manzil: Toshkent sh., Amir Temur ko'chasi, 10-uy"
-    )
-    await message.answer(text, parse_mode=ParseMode.HTML)
-
-
-@dp.message(F.text == "ℹ️ Bot haqida")
-async def show_about(message: types.Message):
-    text = (
-        "<b>ℹ️ Bot haqida:</b>\n\n"
-        "Bu bot orqali siz mazali taomlar va ichimliklarni osongina ko'rib chiqishingiz va buyurtma berishingiz mumkin.\n"
-        "<i>Bot Aiogram 3.x texnologiyasi asosida ishlab chiqilgan.</i> 🚀"
-    )
-    await message.answer(text, parse_mode=ParseMode.HTML)
-
-
-# 2-DARAJA → 1-DARAJA: Orqaga qaytish (Bosh menyuga)
-@dp.message(F.text == "⬅️ Orqaga")
-async def back_to_main(message: types.Message):
-    await message.answer("<b>Bosh menyu:</b>", reply_markup=main_menu, parse_mode=ParseMode.HTML)
-
-
-# 3-DARAJA → 2-DARAJA: Taomlar yoki Ichimliklarga qaytish
-@dp.message(F.text == "⬅️ Taomlarga qaytish")
-async def back_to_taomlar_handler(message: types.Message):
-    await message.answer("<b>Taomlar bo'limi:</b>", reply_markup=taomlar_menu, parse_mode=ParseMode.HTML)
-
-
-@dp.message(F.text == "⬅️ Ichimliklarga qaytish")
-async def back_to_ichimliklar_handler(message: types.Message):
-    await message.answer("<b>Ichimliklar bo'limi:</b>", reply_markup=ichimliklar_menu, parse_mode=ParseMode.HTML)
-
-
-# 3-DARAJA KONTENT: Taomlar mahsulotlari
-@dp.message(F.text.in_(["🍕 Pizza", "🍔 Burger", "🌮 Taco", "🍜 Lag'mon"]))
-async def show_food_product(message: types.Message):
-    product = PRODUCTS["Taomlar"][message.text]
-
-    caption = (
-        f"<b>{product['name']}</b>\n\n"
-        f"📝 <b>Tavsif:</b> {product['desc']}\n"
-        f"💰 <b>Narxi:</b> <u>{product['price']}</u>"
-    )
-
-    image_file = URLInputFile(product["image"])
-    await message.answer_photo(
-        photo=image_file,
-        caption=caption,
-        parse_mode=ParseMode.HTML,
-        reply_markup=back_to_taomlar,
+@dp.callback_query(F.data == "bad_button")
+async def bad_button_handler(call: types.CallbackQuery):
+    # ATAYLAB await call.answer() YOZILMAGAN!
+    # SABABI VA OQIBATI:
+    # 1. Telegram foydalanuvchi interfeysida tugma ustidagi "soat/aylanayotgan yuklanish" (loading spinner)
+    #    taxminan 10-60 soniya davomida yo'qolmay turib qoladi.
+    # 2. Foydalanuvchiga bot qotib qolgandek yoki ishlamayotgandek tuyuladi.
+    # 3. Telegram serveri botga shu callback'ni qayta-qayta yuborishi va keraksiz server resursi sarflanishi mumkin.
+    await call.message.answer(
+        "Siz tugmani bosdingiz, lekin `call.answer()` chaqirilmagani uchun tugmada yuklanish (loading) aylanib turibdi!"
     )
 
 
-# 3-DARAJA KONTENT: Ichimliklar mahsulotlari
-@dp.message(F.text.in_(["☕ Kofe", "🍵 Choy", "🧃 Sok"]))
-async def show_drink_product(message: types.Message):
-    product = PRODUCTS["Ichimliklar"][message.text]
-
-    caption = (
-        f"<b>{product['name']}</b>\n\n"
-        f"📝 <b>Tavsif:</b> {product['desc']}\n"
-        f"💰 <b>Narxi:</b> <u>{product['price']}</u>"
-    )
-
-    image_file = URLInputFile(product["image"])
-    await message.answer_photo(
-        photo=image_file,
-        caption=caption,
-        parse_mode=ParseMode.HTML,
-        reply_markup=back_to_ichimliklar,
-    )
-
-
-# ECHO HANDLER (Eng oxirida bo'lishi shart!)
-@dp.message()
-async def echo_handler(message: types.Message):
-    await message.answer(
-        "❓ Noma'lum buyruq. Iltimos, menyudagi tugmalardan birini tanlang.",
-        reply_markup=main_menu,
-    )
-
-
-# ----------------------------------------------------------------------
-# 4. BOTNI ISHGA TUSHIRISH
-# ----------------------------------------------------------------------
+# ==========================
+# BOTNI ISHGA TUSHIRISH
+# ==========================
 async def main():
-    logging.basicConfig(level=logging.INFO)
-    print("Bot muvaffaqiyatli ishga tushdi...")
+    print("✅ Bot callback funksiyalar bilan ishga tushdi...")
     await dp.start_polling(bot)
 
 
 if __name__ == "__main__":
     asyncio.run(main())
-Navigatsiya sxemasi (3 daraja)
-Plaintext
-[ 1-Daraja: Bosh Menyu ]
-   ├── 🍕 Taomlar
-   │      ├── 🍕 Pizza ──────────> [ 3-Daraja: Rasm + Narx + Tavsif ]
-   │      ├── 🍔 Burger ─────────> [ 3-Daraja: Rasm + Narx + Tavsif ]
-   │      ├── 🌮 Taco ───────────> [ 3-Daraja: Rasm + Narx + Tavsif ]
-   │      ├── 🍜 Lag'mon ────────> [ 3-Daraja: Rasm + Narx + Tavsif ]
-   │      └── ⬅️ Orqaga ──────────> (Bosh Menyuga qaytadi)
-   │
-   ├── 🥤 Ichimliklar
-   │      ├── ☕ Kofe ───────────> [ 3-Daraja: Rasm + Narx + Tavsif ]
-   │      ├── 🍵 Choy ───────────> [ 3-Daraja: Rasm + Narx + Tavsif ]
-   │      ├── 🧃 Sok ────────────> [ 3-Daraja: Rasm + Narx + Tavsif ]
-   │      └── ⬅️ Orqaga ──────────> (Bosh Menyuga qaytadi)
-   │
-   ├── 📞 Bog'lanish
-   └── ℹ️ Bot haqida
-Muhim xususiyatlar:
-Kutubxona: aiogram 3.x versiyasiga moslashtirilgan.
+Kod tarkibidagi muhim xususiyatlar bo'yicha tushuntirish:
+CallbackData klasslari: OrderCB, PaginationCB, RateCB va StarCB orqali ma'lumotlarni xavfsiz va tizimli uzatish yo'lga qo'yilgan.
 
-URLInputFile: Unsplash sahifalaridan olingan rasmlarni Telegram'ga yuklash uchun ishlatildi.
+show_alert=True: /rate tugmalari bosilganda pop-up oyna ko'rinishida rasmiy ogohlantirish beradi.
 
-HTML Formatlash: Barcha matnlar <b>, <i>, va <u> teglaridan foydalanib bezatilgan.
+/stars va edit_text: Tugma bosilganda yangi xabar yubormasdan, mavjud xabarning o'zini o'zgartiradi.
 
-Catch-all (Echo): Mos kelmaydigan har qanday xabarlar uchun eng pastki qismga joylashtirildi.
+/orders va Tasdiqlash: Har bir buyurtma yonida ko'rish, tahrirlash va o'chirish tugmasi bor. O'chirish bosilganda "Ha, o'chiring!" va "Bekor qilish" tasdiq oynasiga o'tadi.
+
+/list Pagination: 50 ta element 5 tadan bo'lib sahifalangan. Oldinga/Orqaga tugmalari va 1/10 ko'rinishidagi sahifa ko'rsatkichi bor.
+
+/no_answer_demo: call.answer() yozilmasa tugmada qanday aylanuvchi yuklanish belgisi paydo bo'lishini va foydalanuvchiga bot qotgandek ko'rinishini amalda tushuntiradi.
