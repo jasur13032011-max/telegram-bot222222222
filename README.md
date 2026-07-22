@@ -1,460 +1,350 @@
 # telegram-bot222222222
-Mana barcha talablaringizga to'liq javob beradigan, aiogram 3.x bazasidagi to'liq loyiha kodi va uning arxitekturasi.
+Mana SQLAlchemy 2.0 (asyncio), aiosqlite va aiogram 3.x bazasida tayyorlangan, Service/Repository pattern arxitekturasiga ega to'liq Telegram bot loyihasi.
 
-Loyihada 7 bosqichli FSM, inline tugmalar orqali tanlovlar, ma'lumotlarni qayta tahrirlash (boshidan yoki aniq bosqichni tanlab), pagination qilingan admin paneli hamda xatoliklarni ushlab turuvchi middleware o'rnatilgan.
-
-🛠 Telegram Bot Kodi (bot.py)
+📁 Loyiha strukturasi
+Plaintext
+bot_project/
+├── database.py       # Engine va sessionmaker
+├── models.py         # User va Order modellari (Mapped pattern)
+├── repositories.py   # Base, User va Order repozitariylari
+├── services.py       # UserService, OrderService (Business logic & Transactions)
+├── middlewares.py    # DBSessionMiddleware va UserContextMiddleware
+├── handlers.py       # Bot komandalari va handler'lar
+└── main.py           # Botni ishga tushirish va init_db()
+1. DB sozlmalari va Modellari (database.py, models.py)
+database.py
 Python
-import asyncio
-import logging
-import re
-from typing import Any, Awaitable, Callable, Dict, List
+from typing import AsyncGenerator
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from aiogram import Bot, Dispatcher, F
-from aiogram.filters import Command
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
-from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import (
-    CallbackQuery,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-    Message,
-    TelegramObject,
-)
+# SQLite (Async) - PostgreSQL uchun: postgresql+asyncpg://user:pass@localhost/dbname
+DATABASE_URL = "sqlite+aiosqlite:///./bot_database.db"
 
-# ------------------------------------------------------------------
-# CONFIG & FAKE DATABASE
-# ------------------------------------------------------------------
-BOT_TOKEN = "YOUR_BOT_TOKEN"
-ADMIN_IDS = [123456789]  # Admin ID-larini kiriting
+engine = create_async_engine(DATABASE_URL, echo=False)
+async_session_maker = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
-APPLICATIONS: Dict[int, dict] = {}  # Application_ID -> Data
 
-# ------------------------------------------------------------------
-# 1. MIDDLEWARE (Logging & Error handling)
-# ------------------------------------------------------------------
-class LoggingMiddleware:
-    """Har bir kelayotgan xabarni log qiladi va try/except bilan xatoni ushlaydi."""
+async def get_db_session() -> AsyncGenerator[AsyncSession, None]:
+    async with async_session_maker() as session:
+        yield session
+models.py
+Python
+from datetime import datetime
+from typing import List, Optional
+from sqlalchemy import BigInteger, ForeignKey, String, DateTime, Float, func
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+
+
+class Base(DeclarativeBase):
+    pass
+
+
+class User(Base):
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)  # Telegram ID
+    full_name: Mapped[str] = mapped_column(String(100))
+    username: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    # Relationship (Bir nechta buyurtmaga ega bo'lishi mumkin)
+    orders: Mapped[List["Order"]] = relationship("Order", back_populates="user", cascade="all, delete-orphan")
+
+
+class Order(Base):
+    __tablename__ = "orders"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("users.id", ondelete="CASCADE"))
+    item_name: Mapped[str] = mapped_column(String(100))
+    price: Mapped[float] = mapped_column(Float)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    # Relationship
+    user: Mapped["User"] = relationship("User", back_populates="orders")
+2. Repozitariylar va Servislar (repositories.py, services.py)
+repositories.py
+Python
+from typing import List, Optional
+from sqlalchemy import select, func
+from sqlalchemy.orm import selectinload
+from sqlalchemy.ext.asyncio import AsyncSession
+from models import User, Order
+
+
+class UserRepository:
+    def __init__(self, session: AsyncSession):
+        self.session = session
+
+    async def get_by_id(self, user_id: int) -> Optional[User]:
+        stmt = select(User).where(User.id == user_id)
+        result = await self.session.execute(stmt)
+        return result.scalar_one_or_none()
+
+    async def create(self, user_id: int, full_name: str, username: Optional[str]) -> User:
+        user = User(id=user_id, full_name=full_name, username=username)
+        self.session.add(user)
+        return user
+
+    async def get_user_with_orders(self, user_id: int) -> Optional[User]:
+        # SELECTINLOAD yordamida N+1 muammosisiz yuklash
+        stmt = select(User).options(selectinload(User.orders)).where(User.id == user_id)
+        result = await self.session.execute(stmt)
+        return result.scalar_one_or_none()
+
+
+class OrderRepository:
+    def __init__(self, session: AsyncSession):
+        self.session = session
+
+    async def create_order(self, user_id: int, item_name: str, price: float) -> Order:
+        order = Order(user_id=user_id, item_name=item_name, price=price)
+        self.session.add(order)
+        return order
+
+    async def get_user_orders(self, user_id: int) -> List[Order]:
+        stmt = select(Order).where(Order.user_id == user_id).order_by(Order.created_at.desc())
+        result = await self.session.execute(stmt)
+        return list(result.scalars().all())
+
+    async def get_stats(self) -> dict:
+        stmt_users = select(func.count(User.id))
+        stmt_orders = select(func.count(Order.id), func.coalesce(func.sum(Order.price), 0.0))
+
+        total_users = (await self.session.execute(stmt_users)).scalar() or 0
+        orders_res = (await self.session.execute(stmt_orders)).one()
+        
+        return {
+            "total_users": total_users,
+            "total_orders": orders_res[0],
+            "total_revenue": orders_res[1]
+        }
+services.py
+Python
+from sqlalchemy.ext.asyncio import AsyncSession
+from repositories import UserRepository, OrderRepository
+from models import User, Order
+
+
+class UserService:
+    def __init__(self, session: AsyncSession):
+        self.session = session
+        self.user_repo = UserRepository(session)
+
+    async def get_or_create_user(self, user_id: int, full_name: str, username: str = None) -> User:
+        user = await self.user_repo.get_by_id(user_id)
+        if not user:
+            # Transaction context orqali avtomatik commit
+            async with self.session.begin():
+                user = await self.user_repo.create(user_id, full_name, username)
+        return user
+
+
+class OrderService:
+    def __init__(self, session: AsyncSession):
+        self.session = session
+        self.order_repo = OrderRepository(session)
+
+    async def create_purchase_transaction(self, user_id: int, item_name: str, price: float) -> Order:
+        """
+        Tranzaksiya misoli: Xaridni amalga oshirish va saqlash.
+        Agarda jarayonda xatolik yuz bersa, session.begin() avtomatik ROLLBACK qiladi.
+        """
+        async with self.session.begin():
+            order = await self.order_repo.create_order(user_id, item_name, price)
+            # Bu yerda to'lov tizimi tekshiruvi yoki boshqa mantiq bo'lishi mumkin
+            return order
+3. Middlewares (middlewares.py)
+Python
+from typing import Any, Awaitable, Callable, Dict
+from aiogram import BaseMiddleware
+from aiogram.types import TelegramObject, User as TelegramUser
+from sqlalchemy.ext.asyncio import AsyncSession
+from database import async_session_maker
+from services import UserService
+
+
+class DBSessionMiddleware(BaseMiddleware):
+    """Har bir so'rov uchun DB Session ochib beradi va yopadi."""
     async def __call__(
         self,
         handler: Callable[[TelegramObject, Dict[str, Any]], Awaitable[Any]],
         event: TelegramObject,
         data: Dict[str, Any]
     ) -> Any:
-        try:
-            if isinstance(event, Message):
-                logging.info(f"[MSG] User: {event.from_user.id} | Text: {event.text}")
-            elif isinstance(event, CallbackQuery):
-                logging.info(f"[CB] User: {event.from_user.id} | Data: {event.data}")
+        async with async_session_maker() as session:
+            data["session"] = session
             return await handler(event, data)
-        except Exception as e:
-            logging.error(f"[ERROR in Middleware]: {e}", exc_info=True)
 
-# ------------------------------------------------------------------
-# 2. FSM STATES
-# ------------------------------------------------------------------
-class Form(StatesGroup):
-    name = State()       # 1/7
-    surname = State()    # 2/7
-    age = State()        # 3/7
-    gender = State()     # 4/7
-    city = State()       # 5/7
-    phone = State()      # 6/7
-    confirm = State()    # 7/7
 
-# ------------------------------------------------------------------
-# KEYBOARDS (INLINE)
-# ------------------------------------------------------------------
-def get_gender_kb():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="👨 Erkak", callback_data="gender_Erkak"),
-            InlineKeyboardButton(text="👩 Ayol", callback_data="gender_Ayol")
-        ]
-    ])
+class UserContextMiddleware(BaseMiddleware):
+    """Userni DBdan qidiradi/yaratadi va data['db_user'] sifatida uzatadi."""
+    async def __call__(
+        self,
+        handler: Callable[[TelegramObject, Dict[str, Any]], Awaitable[Any]],
+        event: TelegramObject,
+        data: Dict[str, Any]
+    ) -> Any:
+        session: AsyncSession = data.get("session")
+        event_user: TelegramUser = data.get("event_from_user")
 
-def get_city_kb():
-    cities = ["Toshkent", "Samarqand", "Buxoro", "Andijon", "Farg'ona", "Namangan"]
-    buttons = [
-        [InlineKeyboardButton(text=city, callback_data=f"city_{city}")] for city in cities
-    ]
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
+        if session and event_user:
+            user_service = UserService(session)
+            db_user = await user_service.get_or_create_user(
+                user_id=event_user.id,
+                full_name=event_user.full_name,
+                username=event_user.username
+            )
+            data["db_user"] = db_user
 
-def get_confirm_kb():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Tasdiqlash", callback_data="confirm_yes")],
-        [
-            InlineKeyboardButton(text="🔄 Boshidan tahrirlash", callback_data="edit_start"),
-            InlineKeyboardButton(text="⚙️ Bosqichni tanlash", callback_data="edit_select")
-        ],
-        [InlineKeyboardButton(text="❌ Bekor qilish", callback_data="cancel_form")]
-    ])
+        return await handler(event, data)
+4. Bot Handler'lari (handlers.py)
+Python
+from aiogram import Router, F
+from aiogram.filters import Command
+from aiogram.types import Message
+from sqlalchemy.ext.asyncio import AsyncSession
+from models import User
+from repositories import UserRepository, OrderRepository
+from services import OrderService
 
-def get_edit_steps_kb():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="1. Ism", callback_data="step_name"), InlineKeyboardButton(text="2. Familiya", callback_data="step_surname")],
-        [InlineKeyboardButton(text="3. Yosh", callback_data="step_age"), InlineKeyboardButton(text="4. Jins", callback_data="step_gender")],
-        [InlineKeyboardButton(text="5. Shahar", callback_data="step_city"), InlineKeyboardButton(text="6. Telefon", callback_data="step_phone")]
-    ])
+router = Router()
 
-# ------------------------------------------------------------------
-# CANCEL HANDLER (/cancel har bosqichda ishlaydi)
-# ------------------------------------------------------------------
-dp = Dispatcher(storage=MemoryStorage())
 
-@dp.message(Command("cancel"))
-@dp.callback_query(F.data == "cancel_form")
-async def cancel_handler(event: TelegramObject, state: FSMContext):
-    current_state = await state.get_state()
-    if current_state is None:
-        text = "Sizda hech qanday faol jarayon yo'q."
-    else:
-        await state.clear()
-        text = "🚫 Anketa to'ldirish bekor qilindi. Qayta boshlash uchun /start bosing."
+@router.message(Command("profile"))
+async def cmd_profile(message: Message, session: AsyncSession, db_user: User):
+    user_repo = UserRepository(session)
     
-    if isinstance(event, CallbackQuery):
-        await event.message.edit_text(text)
-    else:
-        await event.answer(text)
+    # N+1 muammosiz foydalanuvchi va uning buyurtmalarini yuklash
+    user_with_orders = await user_repo.get_user_with_orders(db_user.id)
+    orders_count = len(user_with_orders.orders) if user_with_orders else 0
 
-# ------------------------------------------------------------------
-# 3. FSM HANDLERS (7 Bosqich)
-# ------------------------------------------------------------------
-@dp.message(Command("start"))
-async def cmd_start(message: Message, state: FSMContext):
-    await state.set_state(Form.name)
-    await message.answer("📊 **[1/7]** Anketa to'ldirishni boshlaymiz!\n\nIltimos, **ismingizni** kiriting:\n\n*(Jarayonni bekor qilish uchun /cancel bosing)*")
-
-# Bosqich 1: Ism
-@dp.message(Form.name)
-async def process_name(message: Message, state: FSMContext):
-    if not message.text.isalpha():
-        await message.answer("⚠️ **Xatolik:** Ism faqat harflardan iborat bo'lishi kerak! Qayta kiriting:")
-        return
-    await state.update_data(name=message.text)
-    
-    # Agar faqat bitta bosqichni tahrirlayotgan bo'lsa
-    data = await state.get_data()
-    if data.get("editing_single"):
-        await state.update_data(editing_single=False)
-        await show_confirmation(message, state)
-        return
-
-    await state.set_state(Form.surname)
-    await message.answer("📊 **[2/7]** Endi **familiyangizni** kiriting:")
-
-# Bosqich 2: Familiya
-@dp.message(Form.surname)
-async def process_surname(message: Message, state: FSMContext):
-    if not message.text.isalpha():
-        await message.answer("⚠️ **Xatolik:** Familiya faqat harflardan iborat bo'lishi kerak! Qayta kiriting:")
-        return
-    await state.update_data(surname=message.text)
-
-    data = await state.get_data()
-    if data.get("editing_single"):
-        await state.update_data(editing_single=False)
-        await show_confirmation(message, state)
-        return
-
-    await state.set_state(Form.age)
-    await message.answer("📊 **[3/7]** **Yoshiningizni** kiriting (masalan: 21):")
-
-# Bosqich 3: Yosh (Validatsiya)
-@dp.message(Form.age)
-async def process_age(message: Message, state: FSMContext):
-    if not message.text.isdigit() or not (10 <= int(message.text) <= 100):
-        await message.answer("⚠️ **Xatolik:** Yosh faqat sonlarda (10 dan 100 gacha) bo'lishi kerak! Qayta kiriting:")
-        return
-    await state.update_data(age=int(message.text))
-
-    data = await state.get_data()
-    if data.get("editing_single"):
-        await state.update_data(editing_single=False)
-        await show_confirmation(message, state)
-        return
-
-    await state.set_state(Form.gender)
-    await message.answer("📊 **[4/7]** **Jinsingizni** tanlang:", reply_markup=get_gender_kb())
-
-# Bosqich 4: Jins (Inline)
-@dp.callback_query(Form.gender, F.data.startswith("gender_"))
-async def process_gender(callback: CallbackQuery, state: FSMContext):
-    gender = callback.data.split("_")[1]
-    await state.update_data(gender=gender)
-    await callback.answer()
-
-    data = await state.get_data()
-    if data.get("editing_single"):
-        await state.update_data(editing_single=False)
-        await show_confirmation(callback.message, state, edit_mode=True)
-        return
-
-    await state.set_state(Form.city)
-    await callback.message.edit_text("📊 **[5/7]** Yashaydigan **shahringizni** tanlang:", reply_markup=get_city_kb())
-
-# Bosqich 5: Shahar (Inline)
-@dp.callback_query(Form.city, F.data.startswith("city_"))
-async def process_city(callback: CallbackQuery, state: FSMContext):
-    city = callback.data.split("_")[1]
-    await state.update_data(city=city)
-    await callback.answer()
-
-    data = await state.get_data()
-    if data.get("editing_single"):
-        await state.update_data(editing_single=False)
-        await show_confirmation(callback.message, state, edit_mode=True)
-        return
-
-    await state.set_state(Form.phone)
-    await callback.message.edit_text("📊 **[6/7]** **Telefon raqamingizni** kiriting (Masalan: +998901234567):")
-
-# Bosqich 6: Telefon (Validatsiya Regex)
-@dp.message(Form.phone)
-async def process_phone(message: Message, state: FSMContext):
-    pattern = r"^\+998\d{9}$"
-    if not re.match(pattern, message.text):
-        await message.answer("⚠️ **Xatolik:** Telefon raqami `+998XXXXXXXXX` formatida bo'lishi kerak! Qayta kiriting:")
-        return
-    await state.update_data(phone=message.text)
-
-    await state.set_state(Form.confirm)
-    await show_confirmation(message, state)
-
-# Bosqich 7: Tasdiqlash sahifasi (7/7)
-async def show_confirmation(message_or_cb: Any, state: FSMContext, edit_mode: bool = False):
-    data = await state.get_data()
-    text = (
-        "📊 **[7/7] Ma'lumotlarni tasdiqlang:**\n\n"
-        f"👤 **Ism:** {data.get('name')}\n"
-        f"👤 **Familiya:** {data.get('surname')}\n"
-        f"🎂 **Yosh:** {data.get('age')}\n"
-        f"⚧ **Jins:** {data.get('gender')}\n"
-        f"🏙 **Shahar:** {data.get('city')}\n"
-        f"📞 **Telefon:** {data.get('phone')}\n\n"
-        "Ma'lumotlar to'g'rimi?"
-    )
-    if edit_mode:
-        await message_or_cb.edit_text(text, parse_mode="Markdown", reply_markup=get_confirm_kb())
-    else:
-        await message_or_cb.answer(text, parse_mode="Markdown", reply_markup=get_confirm_kb())
-
-# ------------------------------------------------------------------
-# TAHRIRLASH (Edit) HANDLERLARI
-# ------------------------------------------------------------------
-@dp.callback_query(Form.confirm, F.data == "edit_start")
-async def edit_start(callback: CallbackQuery, state: FSMContext):
-    """Boshidan tahrirlash"""
-    await state.set_state(Form.name)
-    await callback.message.edit_text("📊 **[1/7]** Qaytadan boshlaymiz.\n\nIltimos, **ismingizni** kiriting:")
-
-@dp.callback_query(Form.confirm, F.data == "edit_select")
-async def edit_select_step(callback: CallbackQuery):
-    """Aynan qaysi bosqichni tahrirlashni tanlash"""
-    await callback.message.edit_text("⚙️ Qaysi ma'lumotni o'zgartirmoqchisiz?", reply_markup=get_edit_steps_kb())
-
-@dp.callback_query(Form.confirm, F.data.startswith("step_"))
-async def process_step_choice(callback: CallbackQuery, state: FSMContext):
-    step = callback.data.split("_")[1]
-    await state.update_data(editing_single=True)
-    
-    if step == "name":
-        await state.set_state(Form.name)
-        await callback.message.edit_text("Yangi **ismingizni** kiriting:")
-    elif step == "surname":
-        await state.set_state(Form.surname)
-        await callback.message.edit_text("Yangi **familiyangizni** kiriting:")
-    elif step == "age":
-        await state.set_state(Form.age)
-        await callback.message.edit_text("Yangi **yoshingizni** kiriting:")
-    elif step == "gender":
-        await state.set_state(Form.gender)
-        await callback.message.edit_text("Yangi **jinsingizni** tanlang:", reply_markup=get_gender_kb())
-    elif step == "city":
-        await state.set_state(Form.city)
-        await callback.message.edit_text("Yangi **shahringizni** tanlang:", reply_markup=get_city_kb())
-    elif step == "phone":
-        await state.set_state(Form.phone)
-        await callback.message.edit_text("Yangi **telefon raqamingizni** kiriting (+998...):")
-
-# Save & Submit
-@dp.callback_query(Form.confirm, F.data == "confirm_yes")
-async def save_application(callback: CallbackQuery, state: FSMContext, bot: Bot):
-    data = await state.get_data()
-    app_id = len(APPLICATIONS) + 1
-    data["app_id"] = app_id
-    data["user_id"] = callback.from_user.id
-    
-    # Save to DICT
-    APPLICATIONS[app_id] = data
-    await state.clear()
-
-    await callback.message.edit_text("✅ Anketangiz muvaffaqiyatli saqlandi! Rahmat.")
-
-    # Admin'ga xabar yuborish
-    admin_msg = (
-        f"📥 **Yangi Ariza #{app_id}**\n\n"
-        f"• User ID: `{data['user_id']}`\n"
-        f"• Ism: {data['name']} {data['surname']}\n"
-        f"• Yosh: {data['age']}\n"
-        f"• Telefon: {data['phone']}"
-    )
-    for admin_id in ADMIN_IDS:
-        try:
-            await bot.send_message(admin_id, admin_msg, parse_mode="Markdown")
-        except Exception as e:
-            logging.error(f"Adminga xabar yuborishda xatolik ({admin_id}): {e}")
-
-# ------------------------------------------------------------------
-# 4. ADMIN PANEL (PAGINATION & MANAGEMENT)
-# ------------------------------------------------------------------
-def get_applications_page_kb(page: int = 0, items_per_page: int = 3):
-    keys = list(APPLICATIONS.keys())
-    total_pages = (len(keys) + items_per_page - 1) // items_per_page or 1
-
-    start = page * items_per_page
-    end = start + items_per_page
-    page_keys = keys[start:end]
-
-    builder = []
-    # Arizalar tugmalari
-    for app_id in page_keys:
-        app = APPLICATIONS[app_id]
-        builder.append([InlineKeyboardButton(
-            text=f"📋 #{app_id} - {app['name']} ({app['phone']})", 
-            callback_data=f"app_view_{app_id}_{page}"
-        )])
-
-    # Pagination tugmalari
-    nav_buttons = []
-    if page > 0:
-        nav_buttons.append(InlineKeyboardButton(text="⬅️ Ortga", callback_data=f"app_page_{page - 1}"))
-    nav_buttons.append(InlineKeyboardButton(text=f"📄 {page + 1}/{total_pages}", callback_data="ignore"))
-    if page < total_pages - 1:
-        nav_buttons.append(InlineKeyboardButton(text="Oldinga ➡️", callback_data=f"app_page_{page + 1}"))
-    
-    builder.append(nav_buttons)
-    return InlineKeyboardMarkup(inline_keyboard=builder)
-
-@dp.message(Command("applications"))
-async def cmd_applications(message: Message):
-    if message.from_user.id not in ADMIN_IDS:
-        await message.answer("🚫 Bu buyruq faqat adminlar uchun!")
-        return
-
-    if not APPLICATIONS:
-        await message.answer("📂 Arizalar ro'yxati bo'sh.")
-        return
-
-    await message.answer("📥 **Arizalar ro'yxati:**", parse_mode="Markdown", reply_markup=get_applications_page_kb(0))
-
-@dp.callback_query(F.data.startswith("app_page_"))
-async def process_app_page(callback: CallbackQuery):
-    if callback.from_user.id not in ADMIN_IDS:
-        return
-    page = int(callback.data.split("_")[2])
-    await callback.message.edit_text("📥 **Arizalar ro'yxati:**", parse_mode="Markdown", reply_markup=get_applications_page_kb(page))
-
-@dp.callback_query(F.data.startswith("app_view_"))
-async def process_app_view(callback: CallbackQuery):
-    if callback.from_user.id not in ADMIN_IDS:
-        return
-    
-    _, _, app_id, page = callback.data.split("_")
-    app_id, page = int(app_id), int(page)
-    
-    app = APPLICATIONS.get(app_id)
-    if not app:
-        await callback.answer("❌ Ariza topilmadi!", show_alert=True)
-        return
-
-    text = (
-        f"📄 **Ariza #{app['app_id']}**\n\n"
-        f"👤 **Ism Familiya:** {app['name']} {app['surname']}\n"
-        f"🎂 **Yosh:** {app['age']}\n"
-        f"⚧ **Jins:** {app['gender']}\n"
-        f"🏙 **Shahar:** {app['city']}\n"
-        f"📞 **Telefon:** {app['phone']}\n"
-        f"🆔 **User ID:** `{app['user_id']}`"
+    await message.answer(
+        f"👤 **Profil:**\n\n"
+        f"• ID: `{db_user.id}`\n"
+        f"• Ism: {db_user.full_name}\n"
+        f"• Username: @{db_user.username or 'Yo'q'}\n"
+        f"• Jami buyurtmalar: {orders_count} ta",
+        parse_mode="Markdown"
     )
 
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🗑 O'chirish", callback_data=f"app_delete_{app_id}_{page}")],
-        [InlineKeyboardButton(text="⬅️ Ro'yxatga qaytish", callback_data=f"app_page_{page}")]
-    ])
 
-    await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=kb)
+@router.message(Command("buy"))
+async def cmd_buy(message: Message, session: AsyncSession, db_user: User):
+    order_service = OrderService(session)
+    
+    # Misol uchun yangi mahsulot xarid qilish
+    item_name = "Premium Obuna"
+    price = 49000.0
 
-@dp.callback_query(F.data.startswith("app_delete_"))
-async def process_app_delete(callback: CallbackQuery):
-    if callback.from_user.id not in ADMIN_IDS:
+    order = await order_service.create_purchase_transaction(
+        user_id=db_user.id,
+        item_name=item_name,
+        price=price
+    )
+
+    await message.answer(
+        f"✅ **Xarid muvaffaqiyatli amalga oshirildi!**\n\n"
+        f"📦 Mahsulot: {order.item_name}\n"
+        f"💰 Narxi: {order.price:,.0f} so'm\n"
+        f"🆔 Buyurtma ID: #{order.id}"
+    )
+
+
+@router.message(Command("orders"))
+async def cmd_orders(message: Message, session: AsyncSession, db_user: User):
+    order_repo = OrderRepository(session)
+    orders = await order_repo.get_user_orders(db_user.id)
+
+    if not orders:
+        await message.answer("🛒 Sizda hali buyurtmalar yo'q.")
         return
 
-    _, _, app_id, page = callback.data.split("_")
-    app_id, page = int(app_id), int(page)
+    text = "📋 **Sizning buyurtmalaringiz:**\n\n"
+    for o in orders:
+        text += f"• **#{o.id}** {o.item_name} - {o.price:,.0f} so'm ({o.created_at.strftime('%Y-%m-%d %H:%M')})\n"
 
-    if app_id in APPLICATIONS:
-        del APPLICATIONS[app_id]
-        await callback.answer("🗑 Ariza o'chirildi!", show_alert=True)
-    
-    # Ro'yxatga qaytish
-    if not APPLICATIONS:
-        await callback.message.edit_text("📂 Arizalar ro'yxati bo'sh.")
-    else:
-        # Sahifa chegaradan chiqib ketmasligini tekshirish
-        keys = list(APPLICATIONS.keys())
-        total_pages = (len(keys) + 3 - 1) // 3
-        if page >= total_pages:
-            page = max(0, total_pages - 1)
-        await callback.message.edit_text("📥 **Arizalar ro'yxati:**", parse_mode="Markdown", reply_markup=get_applications_page_kb(page))
+    await message.answer(text, parse_mode="Markdown")
 
-# ------------------------------------------------------------------
-# MAIN RUNNER
-# ------------------------------------------------------------------
+
+@router.message(Command("stats"))
+async def cmd_stats(message: Message, session: AsyncSession):
+    order_repo = OrderRepository(session)
+    stats = await order_repo.get_stats()
+
+    await message.answer(
+        f"📊 **Bot Statistikasi:**\n\n"
+        f"• Foydalanuvchilar: {stats['total_users']} ta\n"
+        f"• Jami buyurtmalar: {stats['total_orders']} ta\n"
+        f"• Jami tushum: {stats['total_revenue']:,.0f} so'm",
+        parse_mode="Markdown"
+    )
+5. Main Runner va DB Initsializatsiyasi (main.py)
+Python
+import asyncio
+import logging
+from aiogram import Bot, Dispatcher
+from database import engine
+from models import Base
+from middlewares import DBSessionMiddleware, UserContextMiddleware
+from handlers import router
+
+BOT_TOKEN = "YOUR_BOT_TOKEN_HERE"
+
+
+async def init_db():
+    """Birinchi marta ishga tushganda jadvallarni yaratadi."""
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+
 async def main():
     logging.basicConfig(level=logging.INFO)
-    bot = Bot(token=BOT_TOKEN)
 
-    # Middleware o'rnatish
-    dp.message.outer_middleware(LoggingMiddleware())
-    dp.callback_query.outer_middleware(LoggingMiddleware())
+    # 1. Baza jadvallarini yaratish
+    await init_db()
+
+    bot = Bot(token=BOT_TOKEN)
+    dp = Dispatcher()
+
+    # 2. Middlewares o'rnatish
+    dp.update.outer_middleware(DBSessionMiddleware())
+    dp.update.outer_middleware(UserContextMiddleware())
+
+    # 3. Router restratsiyasi
+    dp.include_router(router)
 
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
     asyncio.run(main())
-💡 Yozilgan funksiyalarning tushuntirishi:
-7 Bosqichli FSM & Progress Bar ([N/7]):
+💡 N+1 Muammosi va selectinload Yechimi
+❌ N+1 Muammosi nima?
+Faraz qilaylik, 100 ta foydalanuvchi va ularning har birining buyurtmalarini ko'rmoqchimiz:
 
-Har bir bosqich matnida [1/7], [2/7], ..., [7/7] belgilari orqali foydalanuvchiga qaysi bosqichdaligi aniq ko'rsatib boriladi.
+Python
+# 1 ta so'rov: Barcha foydalanuvchilarni olish
+users = await session.scalars(select(User))
 
-Validatsiyalar & Xatolar:
+for user in users:
+    # HAR BIR foydalanuvchi uchun alohida DB so'rov yuboriladi! (100 ta so'rov)
+    print(user.orders) 
+Oqibati: 1 ta boshlang'ich so'rov + 100 ta qo'shimcha so'rov = 101 ta DB so me'yoriy yuklanish (Lazy Loading xatosi).
 
-Ism/Familiya: Faqat alifbo harflaridan (.isalpha()) iborat bo'lishi shart.
+✅ selectinload bilan Yechim
+SQLAlchemy Async rejimda default holatda Lazy Loading ishlamaydi (MissingGreenlet xatosi beradi). Bog'langan obyektlarni bitta samarali SQL zanjiri bilan yuklash uchun selectinload ishlatiladi:
 
-Yosh: Faqat son (.isdigit()) va 10 hamda 100 oralig'ida bo'lishi kerak.
+Python
+from sqlalchemy.orm import selectinload
 
-Telefon: Telegram formati uchun mos keluvchi Regex ^\+998\d{9}$ orqali tekshiriladi (+998901234567).
+# 2 ta umumiy so'rov bilan BARCHA ma'lumotlar yuklanadi (N ta so'rov o'rniga):
+stmt = select(User).options(selectinload(User.orders))
+users = await session.scalars(stmt)
 
-Inline UI & Tahrirlash (Edit):
+for user in users:
+    # Baza bilan qayta bog'lanish bo'lmaydi, ma'lumotlar keshdan olinadi
+    print(user.orders)
+Birinchi SQL so'rov: SELECT * FROM users;
 
-Jins va Shahar inline tugmalar orqali tanlanadi.
-
-7/7 tasdiqlash bosqichida "🔄 Boshidan tahrirlash" butun FSM-ni 1-bosqichdan qayta ishga tushiradi.
-
-"⚙️ Bosqichni tanlash" (Bonus) tugmasi bosilsa, foydalanuvchi faqat o'zi xohlagan bitta ma'lumotni (masalan, yoshini yoki shahrini) o'zgartiradi va avtomatiq ravishda yana tasdiqlash sahifasiga qaytadi.
-
-APPLICATIONS Dict & Admin Notification:
-
-Ma'lumot tasdiqlanganda ariza global dictionary-ga yoziladi va barcha ko'rsatilgan ADMIN_IDS ga bildirishnoma boradi.
-
-Paginated Admin Panel (/applications):
-
-Adminlar har bir sahifada 3 tadan arizani ko'rishadi va "⬅️ Ortga" / "Oldinga ➡️" tugmalari bilan varraqlashlari mumkin.
-
-Har bir arizaga kirib uni batafsil ko'rish va o'chirib tashlash (Delete) imkoniyati mavjud.
-
-/cancel Har qanday holatda:
-
-Foydalanuvchi qaysi bosqichda bo'lishidan qat'i nazar, /cancel buyrug'ini yuborib FSM-ni tozalashi mumkin.
+Ikkinchi SQL so'rov: SELECT * FROM orders WHERE user_id IN (1, 2, 3, ...);
+Natijada ma'lumotlar bir zumda xotiraga yuklanadi va bazaga keraksiz bosim tushmaydi.
